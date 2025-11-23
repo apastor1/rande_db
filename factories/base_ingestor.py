@@ -200,11 +200,12 @@ class BaseIngestor(ABC):
 
             if standardize:
                 # (c) Name
-                first, middle, last = self.standardize_name(normalized_raw)
+                first, middle, last, name_suffix = self.standardize_name(normalized_raw)
                 pr.first_name = _norm_str(first)
                 pr.middle_name = _norm_str(middle)
                 pr.last_name = _norm_str(last)
-                pr.name_canonical = canon_name(pr.first_name, pr.middle_name, pr.last_name)
+                pr.name_suffix = _norm_str(name_suffix)
+                pr.name_canonical = canon_name(pr.first_name, pr.middle_name, pr.last_name, pr.name_suffix)
                 pr.name_hash = hex_md5(pr.name_canonical)
 
                 # (d) Address
@@ -259,6 +260,7 @@ class ExampleCsvIngestor(BaseIngestor):
         "first": "FirstName",
         "middle": "MiddleName",
         "last": "LastName",
+        "name_suffix": "NameSuffix"
     }
     ADDR_COLS = {
         "street_number": "StreetNo",
@@ -272,7 +274,9 @@ class ExampleCsvIngestor(BaseIngestor):
         first = row.get(self.NAME_COLS["first"])
         middle = row.get(self.NAME_COLS["middle"])
         last = row.get(self.NAME_COLS["last"])
-        return first, middle, last
+        name_suffix = row.get(self.NAME_COLS["name_suffix"])
+        
+        return first, middle, last, name_suffix
 
     def standardize_address(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         street_no = row.get(self.ADDR_COLS["street_number"])
@@ -283,4 +287,39 @@ class ExampleCsvIngestor(BaseIngestor):
         return street_no, street_nm, city, state, zip5
 
 
-__all__ = ["BaseIngestor", "ExampleCsvIngestor", "RegisterInfo"]
+class NC_VOTER_CSV_Ingestor(BaseIngestor):
+    """
+    Example for a CSV with columns:
+      FirstName, MiddleName, LastName, StreetNo, StreetName, City, State, Zip
+    """
+
+    NAME_COLS = {
+        "first": "first_name",
+        "middle": "middle_name",
+        "last": "last_name",
+        "name_suffix": "name_suffix_lbl"
+    }
+    ADDR_COLS = {
+        "street_number": "StreetNo",
+        "street_name": "StreetName",
+        "municipality": "City",
+        "state": "State",
+        "zip5": "Zip",
+    }
+
+    def standardize_name(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        first = row.get("first_name")
+        middle = row.get("middle_name")
+        last = row.get("last_name")
+        name_suffix = row.get("name_suffix_lbl")
+        return first, middle, last, name_suffix
+
+    def standardize_address(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+        street_no = row.get(self.ADDR_COLS["street_number"])
+        street_nm = row.get(self.ADDR_COLS["street_name"])
+        city = row.get(self.ADDR_COLS["municipality"])
+        state = row.get(self.ADDR_COLS["state"])
+        zip5 = row.get(self.ADDR_COLS["zip5"])
+        return street_no, street_nm, city, state, zip5
+
+#__all__ = ["BaseIngestor", "ExampleCsvIngestor", "RegisterInfo"]

@@ -51,8 +51,8 @@ def collapse_ws(s: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
-def canon_name(first: Optional[str], middle: Optional[str], last: Optional[str]) -> str:
-    return collapse_ws(" ".join([(first or ""), (middle or ""), (last or "")]))
+def canon_name(first: Optional[str], middle: Optional[str], last: Optional[str], name_suffix: Optional[str]) -> str:
+    return collapse_ws(" ".join([(first or ""), (middle or ""), (last or ""), (name_suffix or "")]))
 
 
 def canon_addr(
@@ -135,6 +135,7 @@ class PersonRecord(Base):
     first_name: Mapped[Optional[str]] = mapped_column(Text)
     middle_name: Mapped[Optional[str]] = mapped_column(Text)
     last_name: Mapped[Optional[str]] = mapped_column(Text)
+    name_suffix: Mapped[Optional[str]] = mapped_column(Text)
 
     # Standardized address
     street_number: Mapped[Optional[str]] = mapped_column(Text)
@@ -174,7 +175,7 @@ class PersonRecord(Base):
     )
 
     def __repr__(self) -> str:
-        return f"<PersonRecord id={self.id!s} name={self.first_name!r} {self.last_name!r}>"
+        return f"<PersonRecord id={self.id!s} name={self.first_name!r} {self.last_name!r} {self.name_suffix!r}>"
 
 
 # -----------------
@@ -262,7 +263,7 @@ class OtherGeocode(Base):
 # -----------------------------------------------------
 
 def _refresh_canon_and_hash(target: PersonRecord) -> None:
-    target.name_canonical = canon_name(target.first_name, target.middle_name, target.last_name)
+    target.name_canonical = canon_name(target.first_name, target.middle_name, target.last_name, target.name_suffix)
     target.address_canonical = canon_addr(
         target.street_number, target.street_name, target.municipality, target.state, target.zip5
     )

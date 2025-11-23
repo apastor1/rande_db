@@ -1,8 +1,8 @@
-"""Replace voter_* with data_file/person_record/census_geocode/other_geocode
+"""initial tables
 
-Revision ID: 7d9884be020c
-Revises: 27ee4ac853d0
-Create Date: 2025-11-23 08:33:01.027404
+Revision ID: 5b8fabef956c
+Revises: 0001_create_schema
+Create Date: 2025-11-23 13:23:52.327482
 
 """
 from typing import Sequence, Union
@@ -12,8 +12,8 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '7d9884be020c'
-down_revision: Union[str, Sequence[str], None] = '27ee4ac853d0'
+revision: str = '5b8fabef956c'
+down_revision: Union[str, Sequence[str], None] = '0001_create_schema'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
@@ -41,6 +41,7 @@ def upgrade() -> None:
     sa.Column('first_name', sa.Text(), nullable=True),
     sa.Column('middle_name', sa.Text(), nullable=True),
     sa.Column('last_name', sa.Text(), nullable=True),
+    sa.Column('name_suffix', sa.Text(), nullable=True),
     sa.Column('street_number', sa.Text(), nullable=True),
     sa.Column('street_name', sa.Text(), nullable=True),
     sa.Column('municipality', sa.Text(), nullable=True),
