@@ -14,6 +14,7 @@ from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from factories.street_parser import StreetParser
 
 from sql_orm import (
     DataFile,
@@ -140,23 +141,18 @@ class BaseIngestor(ABC):
 
     # ---- CSV loaders using pandas ----
 
-    def load_dataframe(self, path: str, **read_csv_kwargs) -> pd.DataFrame:
+    def load_dataframe(self, path: str) -> pd.DataFrame:
         """
         Load entire CSV into memory via pandas.read_csv.
         Customize kwargs (dtype, encoding, na_values, etc.)
         """
-        # sensible defaults for string-heavy data
-        defaults = dict(keep_default_na=True)
-        defaults.update(read_csv_kwargs or {})
-        return pd.read_csv(path, **defaults)
+        return pd.read_csv(path)
 
     def load_chunks(self, path: str, chunksize: int, **read_csv_kwargs) -> Iterator[pd.DataFrame]:
         """
         Stream CSV in chunks via pandas.read_csv(..., chunksize=...).
         """
-        defaults = dict(keep_default_na=True)
-        defaults.update(read_csv_kwargs or {})
-        reader = pd.read_csv(path, chunksize=chunksize, **defaults)
+        reader = pd.read_csv(path, chunksize=chunksize)
         for chunk in reader:
             yield chunk
 
@@ -332,9 +328,16 @@ class NC_VOTER_CSV_Ingestor(BaseIngestor):
 
     def standardize_address(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         res_street_address = row.get("res_street_address")
-        street_no, street_nm = Helper.parse_street_address(res_street_address)
-        street_no = street_no
-        street_nm = street_nm
+
+        sp = StreetParser()
+        parts = sp.parse(s=res_street_address)
+
+        #print(s, "->", parts, "||", sp.standardize(parts, case="lower"))
+
+        #res_street_address = row.get("res_street_address")
+        #street_no, street_nm = Helper.parse_street_address(res_street_address)
+        street_no = parts.get('street_number')
+        street_nm = sp.standardize(parts, case="lower",include_street_number=False)
         city = row.get("res_city_desc")
         state = row.get("state_cd")
         zip5 = row.get("zip_code")
