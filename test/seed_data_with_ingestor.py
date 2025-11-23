@@ -14,8 +14,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from faker import Faker
 
-# your classes
-from factories.base_ingestor import ExampleCsvIngestor   # from ingestors.py you wrote earlier
+# Updated ingestor that uses pandas under the hood
+from factories.base_ingestor import ExampleCsvIngestor  # your pandas-based ingestor
+
 
 def generate_people_csv(path: str, n_rows: int, seed: int = 42) -> None:
     """
@@ -40,11 +41,15 @@ def generate_people_csv(path: str, n_rows: int, seed: int = 42) -> None:
             zip5 = fake.postcode()[:5]
             w.writerow([first, middle, last, street_no, street_nm, city, state, zip5])
 
+
 def main():
-    ap = argparse.ArgumentParser(description="Postgres ingestion using ExampleCsvIngestor + Faker")
+    ap = argparse.ArgumentParser(description="Postgres ingestion using ExampleCsvIngestor + Faker (pandas-first)")
     ap.add_argument("--rows", type=int, default=200, help="Rows to generate")
     ap.add_argument("--outfile", type=str, default="people_seed.csv", help="CSV output path")
     ap.add_argument("--seed", type=int, default=42, help="Random seed")
+    ap.add_argument("--chunksize", type=int, default=None, help="pandas read_csv chunksize (streaming). Omit for full load")
+    ap.add_argument("--batch-size", type=int, default=1000, help="DB insert batch size")
+    ap.add_argument("--encoding", type=str, default="utf-8", help="CSV encoding passed to pandas.read_csv")
     args = ap.parse_args()
 
     db_url = os.environ["DATABASE_URL"]  # fail fast if not set
@@ -58,7 +63,7 @@ def main():
     engine = create_engine(db_url, future=True)
     SessionLocal = sessionmaker(bind=engine, future=True)
 
-    # 3) Ingest via your ingestor
+    # 3) Ingest via pandas-based ingestor
     with SessionLocal() as session:  # type: Session
         ing = ExampleCsvIngestor(session)
 
@@ -66,25 +71,28 @@ def main():
             filename=os.path.basename(args.outfile),
             source="run_ingestion_pg.py",
             sha256_path=args.outfile,    # computes sha256 of file
-            notes="Example ingestion (Faker)",
+            notes="Example ingestion (Faker, pandas)",
             row_count=args.rows,
         )
 
-        if info["duplicate"]:
+        if info.duplicate:
             print("[warn] Duplicate file detected by sha256 — skipping ingest.")
             return
 
-        if info["conflict_filename"]:
+        if info.conflict_filename:
             print("[warn] Filename conflict: same filename already exists with a different sha256. Proceeding with new record.")
 
-        created = ing.ingest_rows(
+        created = ing.ingest_csv(
             data_file=data_file,
-            rows_iterable=ing.parse_rows_from_csv(args.outfile),
-            batch_size=1000,
-            standardize=True,  # fills standardized fields + canonical + hashes
+            path=args.outfile,
+            chunksize=args.chunksize,      # None = load all; or stream in chunks
+            batch_size=args.batch_size,
+            standardize=True,
+            encoding=args.encoding,        # forwarded to pandas.read_csv
         )
 
         print(f"[ok] Ingestion complete. PersonRecord created: {created}")
+
 
 if __name__ == "__main__":
     main()
