@@ -64,7 +64,7 @@ def main():
     SessionLocal = sessionmaker(bind=engine, future=True)
 
     # 3) Ingest via pandas-based ingestor
-    with SessionLocal() as session:  # type: Session
+    with SessionLocal() as session:
         ing = ExampleCsvIngestor(session)
 
         data_file, info = ing.register_data_file(
