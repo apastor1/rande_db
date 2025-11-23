@@ -46,14 +46,36 @@ def new_uuid_str() -> str:
     return str(uuid.uuid4())
 
 
+# def collapse_ws(s: Optional[str]) -> str:
+#     """Lowercase, trim, and collapse runs of whitespace."""
+#     return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+# def canon_name(first: Optional[str], middle: Optional[str], last: Optional[str], name_suffix: Optional[str]) -> str:
+#     return collapse_ws(" ".join([(first or ""), (middle or ""), (last or ""), (name_suffix or "")]))
+
+
+# def canon_addr(
+#     street_number: Optional[str],
+#     street_name: Optional[str],
+#     municipality: Optional[str],
+#     state: Optional[str],
+#     zip5: Optional[str],
+# ) -> str:
+#     return collapse_ws(" ".join([
+#         (street_number or ""),
+#         (street_name or ""),
+#         (municipality or ""),
+#         (state or ""),
+#         (zip5 or ""),
+#     ]))
+
 def collapse_ws(s: Optional[str]) -> str:
     """Lowercase, trim, and collapse runs of whitespace."""
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
-
 def canon_name(first: Optional[str], middle: Optional[str], last: Optional[str], name_suffix: Optional[str]) -> str:
     return collapse_ws(" ".join([(first or ""), (middle or ""), (last or ""), (name_suffix or "")]))
-
 
 def canon_addr(
     street_number: Optional[str],
@@ -62,13 +84,17 @@ def canon_addr(
     state: Optional[str],
     zip5: Optional[str],
 ) -> str:
-    return collapse_ws(" ".join([
-        (street_number or ""),
-        (street_name or ""),
-        (municipality or ""),
-        (state or ""),
-        (zip5 or ""),
-    ]))
+    # Left side: "street_number street_name"
+    left = collapse_ws(f"{street_number or ''} {street_name or ''}")
+
+    # Right side: "municipality, state, zip5" (only present parts, comma-separated)
+    right_parts = [p for p in (municipality, state, zip5) if p]
+    right = ", ".join(collapse_ws(p) for p in right_parts)
+
+    # Join with a comma only if both sides exist
+    if left and right:
+        return f"{left}, {right}"
+    return left or right
 
 
 def hex_md5(s: str) -> str:
