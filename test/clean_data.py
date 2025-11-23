@@ -3,14 +3,10 @@ import os
 from sqlalchemy import create_engine, text, delete
 from sqlalchemy.orm import Session, sessionmaker
 from dotenv import load_dotenv
-load_dotenv() 
+load_dotenv()
 
-from sql_orm import (
-    DataFile,
-    PersonRecord,
-    CensusGeocode,
-    OtherGeocode,
-)
+from sql_orm import DataFile, PersonRecord, CensusGeocode, OtherGeocode
+
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///seed.db")
 
