@@ -39,6 +39,7 @@ class Base(DeclarativeBase):
 
 
 class VoterFile(Base):
+
     __tablename__ = "voter_file"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid_str)
@@ -51,14 +52,14 @@ class VoterFile(Base):
 
     records: Mapped[list["VoterRecord"]] = relationship(back_populates="file")
 
-    __table_args__ = (Index("ix_voter_file_received_at", "received_at"),)
+    __table_args__ = (Index("ix_voter_file_received_at", "received_at"),{"schema": "datalake"},)
 
 
 class VoterRecord(Base):
     __tablename__ = "voter_record"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid_str)
-    file_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("voter_file.id", ondelete="SET NULL"))
+    file_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("datalake.voter_file.id", ondelete="SET NULL"))
 
     raw: Mapped[dict] = mapped_column(JSON, nullable=False)
 
@@ -92,13 +93,14 @@ class VoterRecord(Base):
         Index("ix_voter_record_zip5", "zip5"),
         Index("ix_voter_record_state", "state"),
         Index("ix_voter_record_municipality", "municipality"),
+        {"schema": "datalake"},
     )
 
 
 class VoterGeocode(Base):
     __tablename__ = "voter_geocode"
 
-    record_id: Mapped[str] = mapped_column(String(36), ForeignKey("voter_record.id", ondelete="CASCADE"), primary_key=True)
+    record_id: Mapped[str] = mapped_column(String(36), ForeignKey("datalake.voter_record.id", ondelete="CASCADE"), primary_key=True)
     benchmark: Mapped[str] = mapped_column(Text, primary_key=True)
     vintage: Mapped[str] = mapped_column(Text, primary_key=True)
 
@@ -113,6 +115,7 @@ class VoterGeocode(Base):
     __table_args__ = (
         Index("ix_voter_geocode_combo", "benchmark", "vintage"),
         Index("ix_voter_geocode_geoid", "geoid"),
+        {"schema": "datalake"},
     )
 
 
