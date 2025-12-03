@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from dotenv import load_dotenv
 load_dotenv()
 
-from sql_orm import DataFile, PersonRecord, CensusGeocode, OtherGeocode
+from sql_orm import DataFile, PersonRecord, CensusGeocode, OtherGeocode, Address
 
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///seed.db")
@@ -22,6 +22,7 @@ def soft_clean():
         # Delete children first
         session.execute(delete(CensusGeocode))
         session.execute(delete(OtherGeocode))
+        session.execute(delete(Address))
         session.execute(delete(PersonRecord))
         session.execute(delete(DataFile))
         session.commit()

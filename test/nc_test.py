@@ -16,7 +16,8 @@ from faker import Faker
 
 # Updated ingestor that uses pandas under the hood
 from factories.base_ingestor import NC_VOTER_CSV_Ingestor  # your pandas-based ingestor
-
+from factories.db_lib import update_address_table
+from factories.census_geocode import run_geocoding,MockCensusClient
 
 def generate_people_csv(path: str, n_rows: int, seed: int = 42) -> None:
     """
@@ -90,6 +91,20 @@ def main():
         )
 
         print(f"[ok] Ingestion complete. PersonRecord created: {created}")
+    
+    # 4) update address
+    update_address_table()
+
+    # 5) run geocode
+    client = MockCensusClient()
+
+    run_geocoding(
+        benchmark="2020",
+        vintage="2020",
+        batch_size=5000,
+        client=client,
+    )
+
 
 
 if __name__ == "__main__":

@@ -1,21 +1,31 @@
 # sql_orm.py
 # ---------------------------------------------------------------------
 # Portable SQLAlchemy ORM models for a small datalake:
-# - DataFile (was: VoterFile)         -> datalake.data_file
-# - PersonRecord (was: VoterRecord)   -> datalake.person_record
-# - CensusGeocode (was: VoterGeocode) -> datalake.census_geocode
-# - OtherGeocode (new, 3rd-party)     -> datalake.other_geocode
+# - DataFile                    -> datalake.data_file
+# - PersonRecord                -> datalake.person_record
+# - Address (NEW, address_dim)  -> datalake.address
+# - CensusGeocode (refactored)  -> datalake.census_geocode
+# - OtherGeocode  (refactored)  -> datalake.other_geocode
+#
+# Key changes vs. your previous version:
+# - Introduces Address dimension keyed by address_hash (PK).
+# - CensusGeocode / OtherGeocode now use surrogate PK `id` (uuid string),
+#   and both reference Address via FK: address_hash -> datalake.address(address_hash).
+# - UniqueConstraint on CensusGeocode (address_hash, benchmark, vintage).
+# - PersonRecord still owns address_canonical/address_hash; joins to geocodes are by address_hash.
 #
 # Notes:
-# - DB-agnostic: uses String/JSON, UUIDs stored as String(36).
-# - JSON maps to native JSON where available; emulated on SQLite.
+# - DB-agnostic: uses generic SQLAlchemy types (String/JSON/etc.).
+# - UUIDs stored as String(36) for portability.
+# - JSON maps to native JSON where supported; emulated where not.
 # - PersonRecord maintains canonical strings + md5 hashes via ORM events.
-# - CensusGeocode stores one row per (record_id, benchmark, vintage).
-# - OtherGeocode stores 3rd-party attempts with raw request ("record"),
-#   response payload, and optional latitude/longitude.
+# - Relationships from PersonRecord to geocodes are view-only and join on address_hash.
 # ---------------------------------------------------------------------
 
 from __future__ import annotations
+
+from dotenv import load_dotenv
+load_dotenv()  # ensure env vars (if any) are available at import time
 
 import hashlib
 import re
@@ -31,10 +41,11 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
     event,
     func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, foreign
 
 
 # --------------------------
@@ -46,36 +57,14 @@ def new_uuid_str() -> str:
     return str(uuid.uuid4())
 
 
-# def collapse_ws(s: Optional[str]) -> str:
-#     """Lowercase, trim, and collapse runs of whitespace."""
-#     return re.sub(r"\s+", " ", (s or "").strip().lower())
-
-
-# def canon_name(first: Optional[str], middle: Optional[str], last: Optional[str], name_suffix: Optional[str]) -> str:
-#     return collapse_ws(" ".join([(first or ""), (middle or ""), (last or ""), (name_suffix or "")]))
-
-
-# def canon_addr(
-#     street_number: Optional[str],
-#     street_name: Optional[str],
-#     municipality: Optional[str],
-#     state: Optional[str],
-#     zip5: Optional[str],
-# ) -> str:
-#     return collapse_ws(" ".join([
-#         (street_number or ""),
-#         (street_name or ""),
-#         (municipality or ""),
-#         (state or ""),
-#         (zip5 or ""),
-#     ]))
-
 def collapse_ws(s: Optional[str]) -> str:
     """Lowercase, trim, and collapse runs of whitespace."""
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
+
 def canon_name(first: Optional[str], middle: Optional[str], last: Optional[str], name_suffix: Optional[str]) -> str:
     return collapse_ws(" ".join([(first or ""), (middle or ""), (last or ""), (name_suffix or "")]))
+
 
 def canon_addr(
     street_number: Optional[str],
@@ -84,6 +73,12 @@ def canon_addr(
     state: Optional[str],
     zip5: Optional[str],
 ) -> str:
+    """
+    Canonical address as:
+      "street_number street_name, municipality, state, zip5"
+    Missing parts are omitted without leaving dangling commas.
+    Lowercased with whitespace collapsed.
+    """
     # Left side: "street_number street_name"
     left = collapse_ws(f"{street_number or ''} {street_name or ''}")
 
@@ -141,6 +136,42 @@ class DataFile(Base):
 
 
 # ----------------
+# Address dimension
+# ----------------
+
+class Address(Base):
+    __tablename__ = "address"
+
+    # Primary key is the hash itself for compact joins
+    address_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    address_canonical: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Helpful index for text lookups by canonical (optional)
+    __table_args__ = (
+        Index("ix_address_canonical", "address_canonical"),
+        {"schema": "datalake"},
+    )
+
+    # Relationships
+    person_records: Mapped[List["PersonRecord"]] = relationship(
+        primaryjoin=lambda: Address.address_hash == foreign(PersonRecord.address_hash),
+        viewonly=True,
+        back_populates=None,
+    )
+    census_geocodes: Mapped[List["CensusGeocode"]] = relationship(
+        back_populates="address",
+        cascade="all, delete-orphan",
+    )
+    other_geocodes: Mapped[List["OtherGeocode"]] = relationship(
+        back_populates="address",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<Address hash={self.address_hash!s}>"
+
+
+# ----------------
 # PersonRecord table
 # ----------------
 
@@ -173,7 +204,7 @@ class PersonRecord(Base):
     # Materialized canonical + hashes
     name_canonical: Mapped[str] = mapped_column(Text, nullable=False, default="")
     address_canonical: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    name_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")      # md5 hex (32 chars; 64 allows easy SHA switch)
+    name_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")      # md5 hex (32 chars; 64 allows SHA switch)
     address_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
@@ -181,13 +212,20 @@ class PersonRecord(Base):
     # relationships
     file: Mapped[Optional[DataFile]] = relationship(back_populates="records")
 
+    # View-only joins via address_hash (no FK PersonRecord -> Address)
+    address: Mapped[Optional[Address]] = relationship(
+        primaryjoin=lambda: PersonRecord.address_hash == foreign(Address.address_hash),
+        viewonly=True,
+    )
     census_geocodes: Mapped[List["CensusGeocode"]] = relationship(
-        back_populates="person",
-        cascade="all, delete-orphan",
+        primaryjoin=lambda: PersonRecord.address_hash == foreign(CensusGeocode.address_hash),
+        viewonly=True,
+        back_populates=None,
     )
     other_geocodes: Mapped[List["OtherGeocode"]] = relationship(
-        back_populates="person",
-        cascade="all, delete-orphan",
+        primaryjoin=lambda: PersonRecord.address_hash == foreign(OtherGeocode.address_hash),
+        viewonly=True,
+        back_populates=None,
     )
 
     __table_args__ = (
@@ -205,62 +243,61 @@ class PersonRecord(Base):
 
 
 # -----------------
-# CensusGeocode table
+# CensusGeocode table (surrogate PK + FK to Address)
 # -----------------
 
 class CensusGeocode(Base):
     __tablename__ = "census_geocode"
 
-    # Composite PK to capture {record_id, benchmark, vintage}
-    record_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("datalake.person_record.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    benchmark: Mapped[str] = mapped_column(Text, primary_key=True)
-    vintage: Mapped[str] = mapped_column(Text, primary_key=True)
+    # Surrogate PK (UUID string); switch to Integer autoincrement if preferred
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid_str)
 
-    geoid: Mapped[Optional[str]] = mapped_column(Text)   # e.g., GEOID from Census
-    result: Mapped[Optional[dict]] = mapped_column(JSON) # raw Census response
-    status: Mapped[Optional[str]] = mapped_column(Text)  # 'matched', 'no_match', 'ambiguous', etc.
+    address_hash: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("datalake.address.address_hash", ondelete="CASCADE"),
+        nullable=False,
+    )
+    benchmark: Mapped[str] = mapped_column(Text, nullable=False)
+    vintage: Mapped[str] = mapped_column(Text, nullable=False)
+
+    geoid: Mapped[Optional[str]] = mapped_column(Text)    # e.g., Census GEOID
+    result: Mapped[Optional[dict]] = mapped_column(JSON)  # raw Census response
+    status: Mapped[Optional[str]] = mapped_column(Text)   # 'matched', 'no_match', 'ambiguous', etc.
     geocoded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     notes: Mapped[Optional[str]] = mapped_column(Text)
 
-    person: Mapped[PersonRecord] = relationship(back_populates="census_geocodes")
+    address: Mapped[Address] = relationship(back_populates="census_geocodes")
 
     __table_args__ = (
+        UniqueConstraint("address_hash", "benchmark", "vintage", name="uq_census_addr_bench_vint"),
+        Index("ix_census_geocode_addr", "address_hash"),
         Index("ix_census_geocode_combo", "benchmark", "vintage"),
         Index("ix_census_geocode_geoid", "geoid"),
         {"schema": "datalake"},
     )
 
     def __repr__(self) -> str:
-        return f"<CensusGeocode record_id={self.record_id!s} {self.benchmark!r}-{self.vintage!r} status={self.status!r}>"
+        return f"<CensusGeocode id={self.id!s} addr={self.address_hash!s} {self.benchmark!r}-{self.vintage!r} status={self.status!r}>"
 
 
 # ----------------
-# OtherGeocode table (3rd-party / fallback)
+# OtherGeocode table (surrogate PK + FK to Address)
 # ----------------
 
 class OtherGeocode(Base):
     __tablename__ = "other_geocode"
 
-    # Simple surrogate PK keeps it portable across DBs
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid_str)
 
-    # FK back to the same PersonRecord.id as CensusGeocode
-    record_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("datalake.person_record.id", ondelete="CASCADE"),
+    address_hash: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("datalake.address.address_hash", ondelete="CASCADE"),
         nullable=False,
     )
 
-    # Timestamp of this attempt
     geocoded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
-    # You asked for a DB column literally named "record" (payload we sent).
-    # To avoid clashing with relationship attribute names in Python,
-    # we expose it as 'request' while the actual column name remains "record".
+    # Request payload you sent to provider (DB column name remains "record")
     request: Mapped[Optional[str]] = mapped_column("record", Text)
 
     # Provider response + outcome
@@ -272,16 +309,16 @@ class OtherGeocode(Base):
     latitude: Mapped[Optional[float]] = mapped_column(Float)
     longitude: Mapped[Optional[float]] = mapped_column(Float)
 
-    person: Mapped[PersonRecord] = relationship(back_populates="other_geocodes")
+    address: Mapped[Address] = relationship(back_populates="other_geocodes")
 
     __table_args__ = (
-        Index("ix_other_geocode_record_id", "record_id"),
+        Index("ix_other_geocode_addr", "address_hash"),
         Index("ix_other_geocode_status", "status"),
         {"schema": "datalake"},
     )
 
     def __repr__(self) -> str:
-        return f"<OtherGeocode id={self.id!s} record_id={self.record_id!s} status={self.status!r}>"
+        return f"<OtherGeocode id={self.id!s} addr={self.address_hash!s} status={self.status!r}>"
 
 
 # -----------------------------------------------------
@@ -315,6 +352,7 @@ __all__ = [
     "Base",
     "DataFile",
     "PersonRecord",
+    "Address",
     "CensusGeocode",
     "OtherGeocode",
     "new_uuid_str",
