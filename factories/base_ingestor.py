@@ -6,19 +6,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import hashlib
-import os,re
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Iterable, Iterator, List, Optional, Tuple
 
 import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
 from factories.street_parser import StreetParser
 
 from sql_orm import (
     DataFile,
     PersonRecord,
+    GroundRace,
     canon_name,
     canon_addr,
     hex_md5,
@@ -34,19 +36,13 @@ class RegisterInfo:
     duplicate: bool
     conflict_filename: bool
 
+
 class Helper:
     @staticmethod
     def parse_street_address(addr: str) -> Tuple[Optional[str], str]:
         """
         Split a street address into leading numeric part and the remainder.
-
-        Examples:
-        '100 Main Str'   -> ('100', 'Main Str')
-        '  42  Broadway' -> ('42', 'Broadway')
-        'Main Str 100'   -> (None, 'Main Str 100')
-        ''               -> (None, '')
-
-        If the first word is not all digits, returns (None, original_string_stripped).
+        '100 Main Str' -> ('100', 'Main Str'); 'Main Str' -> (None, 'Main Str')
         """
         s = (addr or "").strip()
         m = re.match(r"^(\d+)\b\s*(.*)$", s)
@@ -75,7 +71,6 @@ class Helper:
         if isinstance(val, str):
             s = val.strip()
             return s if s else None
-        # non-string (int/float/etc.)
         s = str(val).strip()
         return s if s else None
 
@@ -91,10 +86,13 @@ class BaseIngestor(ABC):
       b) add PersonRecord rows with raw payloads from DataFrame rows
       c) populate name fields + canonical/hash
       d) populate address fields + canonical/hash
+      e) (optional) populate GroundRace inline when race_bucket_model is provided
 
     Subclasses implement:
-      - standardize_name(row: dict) -> (first, middle, last)
+      - standardize_name(row: dict) -> (first, middle, last, name_suffix)
       - standardize_address(row: dict) -> (street_number, street_name, municipality, state, zip5)
+      - update_ground_race(person: PersonRecord, *, bucket_model: Optional[str]) -> Optional[Tuple[str, str]]
+        (Return (bucket_model, value) or None to skip.)
     """
 
     def __init__(self, session: Session):
@@ -109,7 +107,6 @@ class BaseIngestor(ABC):
         sha256: Optional[str] = None,
         sha256_path: Optional[str] = None,
         notes: Optional[str] = None,
-        #row_count: Optional[int] = None,
     ) -> Tuple[DataFile, RegisterInfo]:
         if sha256 is None and sha256_path:
             sha256 = Helper.sha256_of_path(sha256_path)
@@ -133,25 +130,20 @@ class BaseIngestor(ABC):
             sha256=sha256,
             source=source,
             notes=notes,
-            row_count=None, # we don't know how many rows yet
+            row_count=None,  # will be filled after ingest
         )
         self.session.add(df)
         self.session.flush()
         return df, RegisterInfo(created=True, duplicate=False, conflict_filename=conflict_filename)
 
-    # ---- CSV loaders using pandas ----
+    # ---- CSV loaders using pandas (no extra kwargs) ----
 
     def load_dataframe(self, path: str) -> pd.DataFrame:
-        """
-        Load entire CSV into memory via pandas.read_csv.
-        Customize kwargs (dtype, encoding, na_values, etc.)
-        """
+        """Load entire CSV into memory via pandas.read_csv (default params)."""
         return pd.read_csv(path)
 
-    def load_chunks(self, path: str, chunksize: int, **read_csv_kwargs) -> Iterator[pd.DataFrame]:
-        """
-        Stream CSV in chunks via pandas.read_csv(..., chunksize=...).
-        """
+    def load_chunks(self, path: str, chunksize: int) -> Iterator[pd.DataFrame]:
+        """Stream CSV in chunks via pandas.read_csv(..., chunksize=...)."""
         reader = pd.read_csv(path, chunksize=chunksize)
         for chunk in reader:
             yield chunk
@@ -164,14 +156,21 @@ class BaseIngestor(ABC):
         df: pd.DataFrame,
         batch_size: int = 1000,
         standardize: bool = True,
+        race_bucket_model: Optional[str] = None,
     ) -> int:
         """
         Insert PersonRecord rows from DataFrame. If standardize=True, also fill
-        name/address + canonical + hashes.
+        name/address + canonical + hashes. If race_bucket_model is set, compute
+        and store GroundRace inline per person.
         """
-        # Convert DataFrame rows to dicts once (avoids pandas Series object reuse issues)
         rows = df.to_dict(orient="records")
-        return self._ingest_rows_iterable(data_file, rows, batch_size, standardize)
+        return self._ingest_rows_iterable(
+            data_file,
+            rows,
+            batch_size=batch_size,
+            standardize=standardize,
+            race_bucket_model=race_bucket_model,
+        )
 
     # ---- (b alt) Ingest CSV in chunks ----
 
@@ -182,7 +181,7 @@ class BaseIngestor(ABC):
         chunksize: Optional[int] = None,
         batch_size: int = 1000,
         standardize: bool = True,
-        **read_csv_kwargs,
+        race_bucket_model: Optional[str] = None,
     ) -> int:
         """
         Load CSV (optionally in chunks) and ingest.
@@ -190,12 +189,24 @@ class BaseIngestor(ABC):
         """
         total = 0
         if chunksize and chunksize > 0:
-            for chunk in self.load_chunks(path, chunksize=chunksize, **read_csv_kwargs):
-                total += self.ingest_dataframe(data_file, chunk, batch_size=batch_size, standardize=standardize)
+            for chunk in self.load_chunks(path, chunksize=chunksize):
+                total += self.ingest_dataframe(
+                    data_file,
+                    chunk,
+                    batch_size=batch_size,
+                    standardize=standardize,
+                    race_bucket_model=race_bucket_model,
+                )
         else:
-            df = self.load_dataframe(path, **read_csv_kwargs)
-            total += self.ingest_dataframe(data_file, df, batch_size=batch_size, standardize=standardize)
-        data_file.row_count=total
+            df = self.load_dataframe(path)
+            total += self.ingest_dataframe(
+                data_file,
+                df,
+                batch_size=batch_size,
+                standardize=standardize,
+                race_bucket_model=race_bucket_model,
+            )
+        data_file.row_count = total
         self.session.commit()
         return total
 
@@ -207,18 +218,20 @@ class BaseIngestor(ABC):
         rows_iterable: Iterable[dict],
         batch_size: int,
         standardize: bool,
+        race_bucket_model: Optional[str],
     ) -> int:
         count = 0
         batch: List[PersonRecord] = []
+        gr_buffer: List[Tuple[PersonRecord, str, str]] = []  # (person, bucket_model, value)
 
         for raw in rows_iterable:
             # Normalize raw dict to ensure None for NaN, strip strings
-            normalized_raw = {k: Helper._norm_str(v) if not isinstance(v, (dict, list)) else v for k, v in raw.items()}
+            normalized_raw = {
+                k: Helper._norm_str(v) if not isinstance(v, (dict, list)) else v
+                for k, v in raw.items()
+            }
 
-            pr = PersonRecord(
-                file_id=data_file.id,
-                raw=normalized_raw,
-            )
+            pr = PersonRecord(file_id=data_file.id, raw=normalized_raw)
 
             if standardize:
                 # (c) Name
@@ -235,7 +248,7 @@ class BaseIngestor(ABC):
                 pr.street_number = Helper._norm_str(street_number)
                 pr.street_name = Helper._norm_str(street_name)
                 pr.municipality = Helper._norm_str(municipality)
-                pr.state = (Helper._norm_str(state) or None)
+                pr.state = Helper._norm_str(state) or None
                 zip5 = Helper._norm_str(zip5)
                 pr.zip5 = zip5[:5] if zip5 else None
 
@@ -248,23 +261,54 @@ class BaseIngestor(ABC):
             batch.append(pr)
             count += 1
 
+            # Inline GroundRace (buffer until we flush PersonRecord to get IDs)
+            if race_bucket_model:
+                maybe = self.update_ground_race(pr, bucket_model=race_bucket_model)
+                if maybe:
+                    bm, val = maybe
+                    gr_buffer.append((pr, bm, val))
+
             if len(batch) >= batch_size:
+                # Flush to assign PersonRecord IDs, then write GroundRace for this batch
                 self.session.flush()
+                for person, bm, val in gr_buffer:
+                    self.session.add(GroundRace(person_id=person.id, bucket_model=bm, value=val))
+                gr_buffer.clear()
                 batch.clear()
+
+        # Final flush for trailing rows, then write remaining GroundRace
+        self.session.flush()
+        for person, bm, val in gr_buffer:
+            self.session.add(GroundRace(person_id=person.id, bucket_model=bm, value=val))
+        gr_buffer.clear()
 
         self.session.commit()
         return count
 
-    # ---- Abstract standardizers ----
+    # ---- Abstract standardizers & race calculator ----
 
     @abstractmethod
-    def standardize_name(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """Return (first, middle, last) pulled from raw row."""
+    def standardize_name(
+        self, row: dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """Return (first, middle, last, name_suffix) pulled from raw row."""
         raise NotImplementedError
 
     @abstractmethod
-    def standardize_address(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def standardize_address(
+        self, row: dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         """Return (street_number, street_name, municipality, state, zip5) pulled from raw row."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_ground_race(
+        self, person: PersonRecord, *, bucket_model: Optional[str]
+    ) -> Optional[Tuple[str, str]]:
+        """
+        Compute ground-race label for this person. Read from person.raw and/or standardized fields.
+        Return (bucket_model, value) to store, or None to skip.
+        """
         raise NotImplementedError
 
 
@@ -275,14 +319,14 @@ class BaseIngestor(ABC):
 class ExampleCsvIngestor(BaseIngestor):
     """
     Example for a CSV with columns:
-      FirstName, MiddleName, LastName, StreetNo, StreetName, City, State, Zip
+      FirstName, MiddleName, LastName, StreetNo, StreetName, City, State, Zip, RaceBucket?
     """
 
     NAME_COLS = {
         "first": "FirstName",
         "middle": "MiddleName",
         "last": "LastName",
-        "name_suffix": "NameSuffix"
+        "name_suffix": "NameSuffix",
     }
     ADDR_COLS = {
         "street_number": "StreetNo",
@@ -292,15 +336,21 @@ class ExampleCsvIngestor(BaseIngestor):
         "zip5": "Zip",
     }
 
-    def standardize_name(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def load_dataframe(self, path: str) -> pd.DataFrame:
+        return pd.read_csv(path)
+
+    def standardize_name(
+        self, row: dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
         first = row.get(self.NAME_COLS["first"])
         middle = row.get(self.NAME_COLS["middle"])
         last = row.get(self.NAME_COLS["last"])
         name_suffix = row.get(self.NAME_COLS["name_suffix"])
-        
         return first, middle, last, name_suffix
 
-    def standardize_address(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def standardize_address(
+        self, row: dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         street_no = row.get(self.ADDR_COLS["street_number"])
         street_nm = row.get(self.ADDR_COLS["street_name"])
         city = row.get(self.ADDR_COLS["municipality"])
@@ -308,39 +358,93 @@ class ExampleCsvIngestor(BaseIngestor):
         zip5 = row.get(self.ADDR_COLS["zip5"])
         return street_no, street_nm, city, state, zip5
 
+    def update_ground_race(
+        self, person: PersonRecord, *, bucket_model: Optional[str]
+    ) -> Optional[Tuple[str, str]]:
+        # Simple passthrough example: look for 'RaceBucket' in raw
+        bm = (bucket_model or "example_v1")
+        raw = person.raw or {}
+        value = raw.get("RaceBucket") or raw.get("race_bucket")
+        value = Helper._norm_str(value)
+        if not value:
+            return None
+        return bm, value
+
 
 class NC_VOTER_CSV_Ingestor(BaseIngestor):
-    """
-    Example for a CSV with columns:
-      FirstName, MiddleName, LastName, StreetNo, StreetName, City, State, Zip
-    """
-    def load_dataframe(self, path: str,) -> pd.DataFrame:
-        df = pd.read_csv(path,quotechar='"',sep='\t',compression='infer',dtype=str, encoding='latin1')
-        df = df.applymap(lambda x: re.sub(r'\s+', ' ', x.replace(',', ' ')).strip() if isinstance(x, str) else x)
+    """North Carolina voter file example (tab-delimited latin1)."""
+
+    def load_dataframe(self, path: str) -> pd.DataFrame:
+        df = pd.read_csv(path, quotechar='"', sep="\t", compression="infer", dtype=str, encoding="latin1")
+        df = df.applymap(lambda x: re.sub(r"\s+", " ", x.replace(",", " ")).strip() if isinstance(x, str) else x)
         return df
-    
-    def standardize_name(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+
+    def standardize_name(
+        self, row: dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
         first = row.get("first_name")
         middle = row.get("middle_name")
         last = row.get("last_name")
         name_suffix = row.get("name_suffix_lbl")
         return first, middle, last, name_suffix
 
-    def standardize_address(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    def standardize_address(
+        self, row: dict
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
         res_street_address = row.get("res_street_address")
 
         sp = StreetParser()
         parts = sp.parse(s=res_street_address)
 
-        #print(s, "->", parts, "||", sp.standardize(parts, case="lower"))
+        street_no = parts.get("street_number")
+        street_nm = sp.standardize(parts, case="lower")
+        # If the standardized string includes the number, drop the first token
+        if street_nm:
+            street_nm = street_nm.split(" ", 1)[1] if " " in street_nm else street_nm
 
-        #res_street_address = row.get("res_street_address")
-        #street_no, street_nm = Helper.parse_street_address(res_street_address)
-        street_no = parts.get('street_number')
-        street_nm = sp.standardize(parts, case="lower",include_street_number=False)
         city = row.get("res_city_desc")
         state = row.get("state_cd")
         zip5 = row.get("zip_code")
         return street_no, street_nm, city, state, zip5
 
-#__all__ = ["BaseIngestor", "ExampleCsvIngestor", "RegisterInfo"]
+    def update_ground_race(
+        self, person: PersonRecord, *, bucket_model: Optional[str]
+    ) -> Optional[Tuple[str, str]]:
+        """
+        bucket_model == 'race6' mapping using raw['race_code'] and raw['ethnic_code']:
+
+        - If ethnic_code == 'HL'  -> value = 'hisp6' (ignore race_code)
+        - Else:
+            W -> white6
+            B -> black6
+            P -> native6
+            A or I -> asian6
+            O or U or M -> other6
+        """
+        bm = (bucket_model or "race6").lower()
+        if bm != "race6":
+            return None
+
+        raw = person.raw or {}
+        rcode = Helper._norm_str(raw.get("race_code"))
+        ecode = Helper._norm_str(raw.get("ethnic_code"))
+
+        if ecode and ecode.upper() == "HL":
+            return "race6", "hisp6"
+
+        if not rcode:
+            return None
+
+        code = rcode.upper()
+        if code == "W":
+            return "race6", "white6"
+        if code == "B":
+            return "race6", "black6"
+        if code == "P":
+            return "race6", "native6"
+        if code in ("A", "I"):
+            return "race6", "asian6"
+        if code in ("O", "U", "M"):
+            return "race6", "other6"
+
+        return None

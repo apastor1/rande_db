@@ -88,8 +88,17 @@ def main():
             chunksize=None,      # None = load all; or stream in chunks
             batch_size=100,
             standardize=True,
+            race_bucket_model="race6",  # <- computed during ingest
         )
 
+        # rows = ing.ingest_csv(
+        #     data_file=df,
+        #     path="nc_voters_2020.tsv",
+        #     chunksize=10000,
+        #     batch_size=1000,
+        #     standardize=True,
+        #     race_bucket_model="race6",  # <- computed during ingest
+        # )
         print(f"[ok] Ingestion complete. PersonRecord created: {created}")
     
     # 4) update address

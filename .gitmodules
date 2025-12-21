@@ -1,0 +1,3 @@
+[submodule "rande_geocoder"]
+	path = rande_geocoder
+	url = git@github.com:apastor1/rande_geocoder.git

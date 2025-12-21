@@ -227,6 +227,10 @@ class PersonRecord(Base):
         viewonly=True,
         back_populates=None,
     )
+    ground_races: Mapped[list["GroundRace"]] = relationship(
+        back_populates="person",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("ix_person_record_file_id", "file_id"),
@@ -319,6 +323,40 @@ class OtherGeocode(Base):
 
     def __repr__(self) -> str:
         return f"<OtherGeocode id={self.id!s} addr={self.address_hash!s} status={self.status!r}>"
+
+# --------------
+# GroundRace table
+# --------------
+
+class GroundRace(Base):
+    __tablename__ = "ground_race"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid_str)
+
+    # Which bucketing/model produced the value (e.g., "bayesian_v1", "surname_model")
+    bucket_model: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # The bucketed value (e.g., "asian", "white", "black", etc.)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # FK to the person this label belongs to
+    person_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("datalake.person_record.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Relationship back to PersonRecord
+    person: Mapped[PersonRecord] = relationship(back_populates="ground_races")
+
+    __table_args__ = (
+        Index("ix_ground_race_person_id", "person_id"),
+        Index("ix_ground_race_bucket_model", "bucket_model"),
+        {"schema": "datalake"},
+    )
+
+    def __repr__(self) -> str:
+        return f"<GroundRace id={self.id!s} person_id={self.person_id!s} model={self.bucket_model!r} value={self.value!r}>"
 
 
 # -----------------------------------------------------
