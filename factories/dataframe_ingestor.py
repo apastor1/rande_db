@@ -4,8 +4,9 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
+from tqdm import tqdm
 import hashlib
-import os
+import os,datetime
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -181,7 +182,8 @@ class BaseDFIngestor(ABC):
         rows = df_out.to_dict(orient="records")
         new_rows: List[dict] = []
 
-        for row in rows:
+        #for row in rows:
+        for row in tqdm(rows, desc="Standardizing rows"):
             # Normalize raw dict: turn NaN into None, strip whitespace
             normalized_raw = {
                 k: Helper._norm_str(v) if not isinstance(v, (dict, list)) else v
@@ -298,7 +300,9 @@ class NC_DF_VOTER_CSV_Ingestor(BaseDFIngestor):
         }
         kwargs.update(read_csv_kwargs)
 
+        print(f"{datetime.datetime.now()} Loading {path}")
         df = pd.read_csv(path, **kwargs)
+        print(f"{datetime.datetime.now()} Loaded {path}")
 
         # Clean up strings: replace commas with space, collapse whitespace, strip
         df = df.applymap(
@@ -306,6 +310,8 @@ class NC_DF_VOTER_CSV_Ingestor(BaseDFIngestor):
             if isinstance(x, str)
             else x
         )
+        print(f"{datetime.datetime.now()} applymap finished {path}")
+
         return df
 
     def standardize_name(self, row: dict) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
