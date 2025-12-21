@@ -4,11 +4,12 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()  # your preference: always load .env
 from tqdm import tqdm
-import os, glob
+import os, glob, csv, tempfile
 import time
 import hashlib
 import subprocess
 from typing import Iterable, List, Optional, Tuple, Dict, Any
+from rande_geocoder.ruxton_geocode_lib import CensusHelper, CensusGeocode
 
 import numpy as np
 import pandas as pd
@@ -17,9 +18,9 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from sql_orm import CensusGeocode, new_uuid_str  # from your models
+from sql_orm import new_uuid_str, CensusGeocode as CensusGeocodeTable  # from your models
 
-class CensusHelper(object):
+class DEFUNCTCensusHelper(object):
     @staticmethod
     def get_tab_block_shapefiles(dest_path:str=None):
         """
@@ -663,11 +664,197 @@ class MockCensusClient(CensusClient):
         time.sleep(0.2)
         return out
 
+
 class BatchCensusClient(CensusClient):
-    def send_batch(self,rows: List[Tuple[str, str]],*,benchmark: str,vintage: str) -> List[Dict[str, Any]]:
+    """
+    Real Census client using our internal CensusGeocode + CensusHelper.block_to_census.
+
+    - Input rows: (address_hash, address_canonical)
+      * address_canonical is expected to be "street, city, state, zip"
+        (same thing RXGeocoder.format_address_fields generates).
+    - Uses the Census batch API (addressbatch) via CensusGeocode.
+    - Returns records shaped like MockCensusClient:
+        {"address_hash", "geoid", "status", "result"}.
+    """
+
+    def __init__(self, *, n_max_tries: int = 3, timeout: int = 450) -> None:
+        self.n_max_tries = n_max_tries
+        self.timeout = timeout
+
+    # ---------- helpers ----------
+
+    def _write_chunk_file(
+        self,
+        rows: List[Tuple[str, str]],
+    ) -> str:
+        """
+        Create a temp CSV file in the format the Census batch API expects:
+
+            id,street,city,state,zip
+
+        We assume address_canonical is already: "street, city, state, zip".
+        If it's not, you can adjust the parsing below.
+        """
+        fd, path = tempfile.mkstemp(prefix="census_batch_", suffix=".csv")
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            # No header: Census endpoint expects raw rows
+            for idx, (_addr_hash, canonical) in enumerate(rows):
+                canonical = canonical or ""
+                # Try to split into 4 parts: street, city, state, zip
+                parts = [p.strip() for p in canonical.split(",")]
+
+                if len(parts) >= 4:
+                    street, city, state, zipcode = parts[0], parts[1], parts[2], parts[3]
+                else:
+                    # Fallback: shove everything into street and leave city/state/zip blank
+                    street, city, state, zipcode = canonical.strip(), "", "", ""
+
+                writer.writerow([idx, street, city, state, zipcode])
+
+        return path
+
+    def _map_census_result(
+        self,
+        rows: List[Tuple[str, str]],
+        raw: List[Dict[str, Any]] | None,
+        *,
+        benchmark: str,
+        vintage: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convert the list of dicts from CensusHelper.block_to_census(...) into
+        the structure expected by upsert_census_results.
+        """
         out: List[Dict[str, Any]] = []
-        result = CensusHelper.block_to_census(cg,chunk_file,self.n_max_tries,self.timeout)
+
+        # index -> address_hash
+        idx_to_hash = [address_hash for address_hash, _canon in rows]
+        seen_hashes: set[str] = set()
+
+        if not raw:
+            # No response at all (timeout / error): everything is no_match
+            for address_hash, _canon in rows:
+                out.append({
+                    "address_hash": address_hash,
+                    "geoid": None,
+                    "status": "no_match",
+                    "result": {
+                        "reason": "no_response_from_census",
+                        "benchmark": benchmark,
+                        "vintage": vintage,
+                    },
+                })
+            return out
+
+        for r in raw:
+            # r is produced by CensusGeocode._parse_batch_result via block_to_census:
+            # keys include: id, match, matchtype, parsed, tigerlineid,
+            #               statefp, countyfp, tract, block, lat, lon, ...
+            try:
+                idx = int(r["id"])
+            except Exception:
+                # If `id` is missing or malformed, skip it
+                continue
+
+            if idx < 0 or idx >= len(idx_to_hash):
+                # Out-of-range id
+                continue
+
+            address_hash = idx_to_hash[idx]
+            seen_hashes.add(address_hash)
+
+            match = bool(r.get("match"))
+            matchtype = (r.get("matchtype") or "").lower()
+
+            statefp = r.get("statefp")
+            countyfp = r.get("countyfp")
+            tract = r.get("tract")
+            block = r.get("block")
+
+            # Default
+            geoid = None
+            status = "no_match"
+
+            if match and statefp and countyfp and tract and block:
+                geoid = f"{statefp}{countyfp}{tract}{block}"
+
+                # Treat non-exact matches as ambiguous if you want to distinguish them
+                if matchtype and matchtype != "exact":
+                    status = "ambiguous"
+                else:
+                    status = "matched"
+
+            out.append({
+                "address_hash": address_hash,
+                "geoid": geoid,
+                "status": status,
+                "result": {
+                    "raw": r,              # full Census payload for debugging/audit
+                    "benchmark": benchmark,
+                    "vintage": vintage,
+                },
+            })
+
+        # Any rows we sent that did not appear in raw => no_match
+        for address_hash, _canon in rows:
+            if address_hash in seen_hashes:
+                continue
+            out.append({
+                "address_hash": address_hash,
+                "geoid": None,
+                "status": "no_match",
+                "result": {
+                    "reason": "missing_from_census_batch",
+                    "benchmark": benchmark,
+                    "vintage": vintage,
+                },
+            })
+
         return out
+
+    # ---------- public API ----------
+
+    def send_batch(
+        self,
+        rows: List[Tuple[str, str]],
+        *,
+        benchmark: str,
+        vintage: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Implementation of the abstract CensusClient API.
+
+        rows: list of (address_hash, address_canonical)
+        benchmark/vintage: stored in `result` for traceability and passed
+                           into our CensusGeocode object.
+        """
+        if not rows:
+            return []
+
+        # Create our client with the correct benchmark/vintage
+        cg = CensusGeocode(benchmark=benchmark, vintage=vintage)
+
+        # Build a temporary batch CSV that the Census API understands
+        chunk_file = self._write_chunk_file(rows)
+
+        try:
+            raw = CensusHelper.block_to_census(cg, chunk_file, self.n_max_tries,self.timeout,)
+        finally:
+            # Always clean up the temp file
+            try:
+                os.remove(chunk_file)
+            except OSError:
+                pass
+
+        # Convert to our canonical structure
+        return self._map_census_result(
+            rows,
+            raw,
+            benchmark=benchmark,
+            vintage=vintage,
+        )
+
 
 # ---------- DB helpers ----------
 
@@ -707,7 +894,7 @@ def fetch_batch(session: Session, *, benchmark: str, vintage: str, last_key: Opt
 def upsert_census_results(session: Session, *, benchmark: str, vintage: str, results: List[Dict[str, Any]]) -> int:
     """
     Upsert into datalake.census_geocode using Postgres ON CONFLICT.
-    Expects `CensusGeocode` unique key on (address_hash, benchmark, vintage).
+    Expects `CensusGeocodeTable` unique key on (address_hash, benchmark, vintage).
     """
     if not results:
         return 0
@@ -727,17 +914,17 @@ def upsert_census_results(session: Session, *, benchmark: str, vintage: str, res
         })
 
     stmt = (
-        pg_insert(CensusGeocode)
+        pg_insert(CensusGeocodeTable)
         .values(rows)
         .on_conflict_do_update(
-            index_elements=[CensusGeocode.address_hash, CensusGeocode.benchmark, CensusGeocode.vintage],
+            index_elements=[CensusGeocodeTable.address_hash, CensusGeocodeTable.benchmark, CensusGeocodeTable.vintage],
             set_={
-                "geoid": pg_insert(CensusGeocode).excluded.geoid,
-                "result": pg_insert(CensusGeocode).excluded.result,
-                "status": pg_insert(CensusGeocode).excluded.status,
+                "geoid": pg_insert(CensusGeocodeTable).excluded.geoid,
+                "result": pg_insert(CensusGeocodeTable).excluded.result,
+                "status": pg_insert(CensusGeocodeTable).excluded.status,
                 # refresh timestamp on update if you prefer:
                 # "geocoded_at": func.now(),
-                "notes": pg_insert(CensusGeocode).excluded.notes,
+                "notes": pg_insert(CensusGeocodeTable).excluded.notes,
             }
         )
     )

@@ -17,7 +17,7 @@ from faker import Faker
 # Updated ingestor that uses pandas under the hood
 from factories.base_ingestor import NC_VOTER_CSV_Ingestor  # your pandas-based ingestor
 from factories.db_lib import update_address_table
-from factories.census_geocode import run_geocoding,MockCensusClient
+from factories.census_geocode import run_geocoding, BatchCensusClient, MockCensusClient
 
 def generate_people_csv(path: str, n_rows: int, seed: int = 42) -> None:
     """
@@ -105,15 +105,28 @@ def main():
     update_address_table()
 
     # 5) run geocode
-    client = MockCensusClient()
+    if False:
+        client = MockCensusClient()
+
+        run_geocoding(
+            benchmark="2020",
+            vintage="2020",
+            batch_size=5000,
+            client=client,
+        )
+
+    # For real Census:
+    client = BatchCensusClient(
+        n_max_tries=3,
+        timeout=450,
+    )
 
     run_geocoding(
-        benchmark="2020",
-        vintage="2020",
+        benchmark="2020",   # or just "2020" if you prefer, but
+        vintage="2020",    # match what your CensusGeocode DEFAULT_* use
         batch_size=5000,
         client=client,
     )
-
 
 
 if __name__ == "__main__":
